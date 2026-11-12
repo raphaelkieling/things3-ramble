@@ -8,7 +8,8 @@ enum RambleChecks {
         try testValidatesDatesAndKeepsExplicitTaskDetails()
         try testThingsUsesACreateBatchAndConfirmsTheMatchingIDs()
         try testConvertsStereoInputToRealtimePCM()
-        print("4 verificações passaram.")
+        testMeterKeepsRecentLevelsInOrder()
+        print("5 verificações passaram.")
     }
 
     private static func require<T>(_ value: T?, file: StaticString = #fileID, line: UInt = #line) -> T {
@@ -59,7 +60,8 @@ enum RambleChecks {
                        when: nil, checklist: ["Separar A+B"]),
             SpokenTask(title: "Ligar para a gráfica", notes: nil, deadline: nil, when: "2026-11-12@09:30", checklist: []),
         ]
-        let batch = ThingsRequest(tasks: tasks)
+        let area = ThingsDestination(id: "work-area-id", name: "Work", isProject: false)
+        let batch = ThingsRequest(tasks: tasks, destinations: [tasks[0].previewKey: area])
         let url = try batch.url(token: "fake+&token")
         precondition(url.scheme == "things")
         precondition(url.path == "/json")
@@ -75,10 +77,13 @@ enum RambleChecks {
         precondition(first["title"] as? String == tasks[0].title)
         precondition(first["notes"] as? String == tasks[0].notes)
         precondition(first["deadline"] as? String == tasks[0].deadline)
+        precondition(first["list-id"] as? String == area.id)
         let checklist = require(first["checklist-items"] as? [[String: Any]])
         precondition(checklist[0]["type"] as? String == "checklist-item")
         precondition((checklist[0]["attributes"] as? [String: String])?["title"] == "Separar A+B")
-        precondition((operations[1]["attributes"] as? [String: String])?["when"] == tasks[1].when)
+        let second = require(operations[1]["attributes"] as? [String: String])
+        precondition(second["when"] == tasks[1].when)
+        precondition(second["list-id"] == nil)
 
         let success = require(items["x-success"])
         var callback = require(URLComponents(string: success))
@@ -111,5 +116,13 @@ enum RambleChecks {
         precondition((900...1_088).contains(result.frameLength))
         let samples = require(result.int16ChannelData?.pointee)
         precondition(UnsafeBufferPointer(start: samples, count: Int(result.frameLength)).contains { $0 > 2_000 })
+    }
+
+    private static func testMeterKeepsRecentLevelsInOrder() {
+        let meter = VoiceMeter()
+        precondition(meter.levels == Array(repeating: 0, count: VoiceMeter.barCount))
+        let samples = (0...VoiceMeter.barCount).map { Float($0) / Float(VoiceMeter.barCount) }
+        for sample in samples { meter.update(sample) }
+        precondition(meter.levels == Array(samples.suffix(VoiceMeter.barCount)))
     }
 }

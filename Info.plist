@@ -24,6 +24,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>O Ramble usa o microfone para gravar as ações que você quer adicionar ao Things.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>O Ramble consulta seus projetos e áreas do Things para escolher onde adicionar cada tarefa.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

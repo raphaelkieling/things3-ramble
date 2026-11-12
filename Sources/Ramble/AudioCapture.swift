@@ -3,11 +3,15 @@ import Foundation
 import os
 
 final class VoiceMeter: Sendable {
-    private let amplitude = OSAllocatedUnfairLock(initialState: Float.zero)
-    var level: Float { amplitude.withLock { $0 } }
+    static let barCount = 17
+    private let history = OSAllocatedUnfairLock(initialState: [Float](repeating: 0, count: barCount))
+    var levels: [Float] { history.withLock { $0 } }
 
     func update(_ value: Float) {
-        amplitude.withLock { $0 = value }
+        history.withLock {
+            $0.removeFirst()
+            $0.append(value)
+        }
     }
 }
 
@@ -31,13 +35,13 @@ final class AudioCapture {
             try engine.start()
         } catch {
             stop()
-            throw RambleError("Confira a entrada de áudio nos Ajustes do Sistema.")
+            throw RambleError(tr("Confira a entrada de áudio nos Ajustes do Sistema."))
         }
 
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
         ) { [continuation] _ in
-            continuation.finish(throwing: RambleError("A entrada de áudio mudou durante a captura."))
+            continuation.finish(throwing: RambleError(tr("A entrada de áudio mudou durante a captura.")))
         }
     }
 
@@ -52,7 +56,6 @@ final class AudioCapture {
             tapInstalled = false
         }
         continuation.finish()
-        meter.update(0)
     }
 
     private nonisolated static func installTap(
@@ -64,7 +67,7 @@ final class AudioCapture {
         guard format.sampleRate > 0, format.channelCount > 0,
               let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000, channels: 1, interleaved: true),
               let converter = AVAudioConverter(from: format, to: target) else {
-            throw RambleError("Nenhum microfone disponível. Confira a entrada de áudio do Mac.")
+            throw RambleError(tr("Nenhum microfone disponível. Confira a entrada de áudio do Mac."))
         }
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
             do {
@@ -81,7 +84,7 @@ final class AudioCapture {
 
                 let data = Data(bytes: channel, count: samples.count * MemoryLayout<Int16>.size)
                 if case .dropped = continuation.yield(data) {
-                    continuation.finish(throwing: RambleError("A conexão ficou lenta demais para transmitir a gravação."))
+                    continuation.finish(throwing: RambleError(tr("A conexão ficou lenta demais para transmitir a gravação.")))
                 }
             } catch {
                 continuation.finish(throwing: error)
@@ -94,7 +97,7 @@ final class AudioCapture {
         let ratio = format.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 64
         guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
-            throw RambleError("Não foi possível preparar o áudio.")
+            throw RambleError(tr("Não foi possível preparar o áudio."))
         }
 
         var provided = false
@@ -109,7 +112,7 @@ final class AudioCapture {
             return buffer
         }
         guard status != .error else {
-            throw RambleError("A entrada de áudio mudou durante a captura.")
+            throw RambleError(tr("A entrada de áudio mudou durante a captura."))
         }
         return output
     }

@@ -96,7 +96,7 @@ struct RealtimeTranscriber {
                         while true {
                             let event = try await Self.receive(from: socket)
                             if event.type == TranscriptEvent.failed {
-                                throw RambleError("A OpenAI não conseguiu transcrever a gravação.")
+                                throw RambleError(tr("A OpenAI não conseguiu transcrever a gravação."))
                             }
                             let update = turn.apply(event)
                             if let partial = update.partial { await onPartial(partial) }
@@ -111,7 +111,7 @@ struct RealtimeTranscriber {
                     while let result = try await group.next() {
                         if let result { return result }
                     }
-                    throw RambleError("A conexão de áudio foi encerrada.")
+                    throw RambleError(tr("A conexão de áudio foi encerrada."))
                 }
             } catch {
                 if let status = (socket.response as? HTTPURLResponse)?.statusCode, !(200...299).contains(status), status != 101 {
@@ -135,7 +135,7 @@ struct RealtimeTranscriber {
         switch message {
         case .string(let value): data = Data(value.utf8)
         case .data(let value): data = value
-        @unknown default: throw RambleError("A OpenAI enviou uma resposta de áudio inválida.")
+        @unknown default: throw RambleError(tr("A OpenAI enviou uma resposta de áudio inválida."))
         }
 
         let event = try JSONDecoder().decode(TranscriptEvent.self, from: data)
@@ -143,7 +143,7 @@ struct RealtimeTranscriber {
             switch event.error?.code {
             case "invalid_api_key": throw OpenAI.httpError(401)
             case "rate_limit_exceeded", "insufficient_quota": throw OpenAI.httpError(429)
-            default: throw RambleError("A OpenAI recusou a sessão de transcrição. Confira o acesso ao modelo gpt-live-transcribe.")
+            default: throw RambleError(tr("A OpenAI recusou a sessão de transcrição. Confira o acesso ao modelo gpt-live-transcribe."))
             }
         }
         return event

@@ -21,7 +21,7 @@ struct Credentials: Codable {
         if status == errSecItemNotFound { return nil }
         try check(status)
         guard let data = result as? Data else {
-            throw RambleError("Não foi possível ler as credenciais salvas nas Chaves do macOS.")
+            throw RambleError(tr("Não foi possível ler as credenciais salvas nas Chaves do macOS."))
         }
         return try JSONDecoder().decode(Self.self, from: data)
     }
@@ -34,7 +34,7 @@ struct Credentials: Codable {
             return
         }
         guard !openAIKey.isEmpty, !thingsToken.isEmpty else {
-            throw RambleError("Preencha os dois campos ou deixe os dois vazios para apagar as credenciais.")
+            throw RambleError(tr("Preencha os dois campos ou deixe os dois vazios para apagar as credenciais."))
         }
 
         let value = [kSecValueData as String: try JSONEncoder().encode(self)]
@@ -48,7 +48,7 @@ struct Credentials: Codable {
 
     private static func check(_ status: OSStatus) throws {
         guard status == errSecSuccess else {
-            throw RambleError("Não foi possível acessar as Chaves do macOS (código \(status)).")
+            throw RambleError(String(format: tr("Não foi possível acessar as Chaves do macOS (código %d)."), status))
         }
     }
 }

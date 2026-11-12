@@ -23,6 +23,7 @@ private final class CaptureRun {
     var finishing = false
     var transcript = ""
     var preview: [SpokenTask] = []
+    var finalTasks: [SpokenTask]?
     var previewFailed = false
     var requestedTranscript = ""
     var renderedTranscript = ""
@@ -51,6 +52,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private var hotKey: EventHotKeyRef?
+    private var connectingEscape: EventHotKeyRef?
     private var hotKeyHandler: EventHandlerRef?
     private var pendingPermission: UUID?
     private var capture: CaptureRun?
@@ -85,6 +87,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopConnectingEscape()
         capture?.cancel()
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let hotKeyHandler { RemoveEventHandler(hotKeyHandler) }
@@ -132,13 +135,15 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.resetPreview()
         let id = UUID()
         pendingPermission = id
+        watchConnectingEscape()
         panel.render(.connecting)
         Task {
             let allowed = await AVAudioApplication.requestRecordPermission()
             guard pendingPermission == id else { return }
             pendingPermission = nil
             guard allowed else {
-                showNotice("Ative o microfone em Ajustes do Sistema → Privacidade e Segurança → Microfone.")
+                stopConnectingEscape()
+                showNotice(tr("Ative o microfone em Ajustes do Sistema → Privacidade e Segurança → Microfone."))
                 return
             }
             do {
@@ -149,6 +154,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 panel.makeKeyAndOrderFront(nil)
                 connect(run)
             } catch {
+                stopConnectingEscape()
                 showNotice(message(for: error))
             }
         }
@@ -161,7 +167,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         run.timeoutTask = Task {
             try? await Task.sleep(for: .seconds(15))
             guard !Task.isCancelled, capture?.id == id else { return }
-            failCapture("A conexão com a OpenAI demorou demais.")
+            failCapture(tr("A conexão com a OpenAI demorou demais."))
         }
         run.socketTask = Task { [self] in
             do {
@@ -182,6 +188,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func transcriptionReady(_ id: UUID) {
         guard let run = capture, run.id == id, !run.finishing else { return }
+        stopConnectingEscape()
         run.timeoutTask?.cancel()
         panel.render(.listening, meter: run.audio.meter)
     }
@@ -224,7 +231,13 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         #if DEBUG
         if fixtureActive { finishVisualFixture(confirmed: true); return }
         #endif
-        guard let run = capture, !run.finishing else { return }
+        guard let run = capture else { return }
+        if let tasks = run.finalTasks {
+            deliver(tasks, from: run)
+            return
+        }
+        guard !run.finishing else { return }
+        stopConnectingEscape()
         run.finishing = true
         run.audio.stop()
         run.previewTask?.cancel()
@@ -235,7 +248,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         run.timeoutTask = Task {
             try? await Task.sleep(for: .seconds(15))
             guard !Task.isCancelled, capture?.id == id else { return }
-            failCapture("A OpenAI demorou para concluir a transcrição.")
+            failCapture(tr("A OpenAI demorou para concluir a transcrição."))
         }
     }
 
@@ -249,11 +262,21 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             tasks = try await OpenAI(apiKey: run.credentials.openAIKey).extractTasks(from: transcript, today: run.date, dismissed: panel.dismissedTitles)
         }
         guard capture?.id == run.id, !Task.isCancelled else { return }
-        capture = nil
         run.socketTask = nil
+        let visible = panel.visibleTasks(tasks)
+        if !visible.isEmpty, Set(visible.map(\.previewKey)) != panel.visibleTaskKeys {
+            run.finalTasks = visible
+            panel.render(.review, tasks: visible)
+            return
+        }
+        deliver(visible, from: run)
+    }
+
+    private func deliver(_ tasks: [SpokenTask], from run: CaptureRun) {
+        capture = nil
         let visibleTasks = panel.visibleTasks(tasks)
         guard !visibleTasks.isEmpty else {
-            showNotice("Nenhuma ação encontrada.")
+            showNotice(tr("Nenhuma ação encontrada."))
             return
         }
         do {
@@ -265,9 +288,9 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func sendToThings(_ tasks: [SpokenTask], token: String) throws {
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: ThingsRequest.bundleID) else {
-            throw RambleError("Abra ou instale o Things 3 neste Mac para adicionar as tarefas.")
+            throw RambleError(tr("Abra ou instale o Things 3 neste Mac para adicionar as tarefas."))
         }
-        let request = ThingsRequest(tasks: tasks)
+        let request = ThingsRequest(tasks: tasks, destinations: panel.destinations)
         let url = try request.url(token: token)
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
@@ -296,13 +319,13 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         deliveryTimeout = nil
         switch result {
         case .success(let count):
-            showNotice(count == 1 ? "1 tarefa adicionada ao Things" : "\(count) tarefas adicionadas ao Things", success: true)
+            showNotice(count == 1 ? tr("1 tarefa adicionada ao Things") : String(format: tr("%d tarefas adicionadas ao Things"), count), success: true)
         case .rejected:
-            showNotice("O Things recusou o envio. Confira se as URLs estão ativadas e se o token está correto.", tasks: delivery.tasks)
+            showNotice(tr("O Things recusou o envio. Confira se as URLs estão ativadas e se o token está correto."), tasks: delivery.tasks)
         case .canceled:
-            showNotice("Envio cancelado no Things.", tasks: delivery.tasks)
+            showNotice(tr("Envio cancelado no Things."), tasks: delivery.tasks)
         case .unconfirmed:
-            showNotice("O Things não confirmou o envio. Confira as listas antes de tentar novamente.", tasks: delivery.tasks)
+            showNotice(tr("O Things não confirmou o envio. Confira as listas antes de tentar novamente."), tasks: delivery.tasks)
         }
     }
 
@@ -317,6 +340,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if fixtureActive { finishVisualFixture(confirmed: false); return }
         #endif
         guard delivery == nil else { return }
+        stopConnectingEscape()
         pendingPermission = nil
         capture?.cancel()
         capture = nil
@@ -338,11 +362,11 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func message(for error: Error) -> String {
         if let error = error as? RambleError { return error.message }
         if let error = error as? URLError {
-            if error.code == .timedOut { return "A OpenAI demorou para responder. Tente uma nova captura." }
+            if error.code == .timedOut { return tr("A OpenAI demorou para responder. Tente uma nova captura.") }
             if error.code == .userAuthenticationRequired { return OpenAI.httpError(401).message }
-            return "A conexão com a OpenAI falhou. Confira a internet e a chave de API."
+            return tr("A conexão com a OpenAI falhou. Confira a internet e a chave de API.")
         }
-        return "Não foi possível concluir a captura. Tente novamente."
+        return tr("Não foi possível concluir a captura. Tente novamente.")
     }
 
     @objc private func showSettings() {
@@ -378,7 +402,10 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveCredentials: @escaping (Credentials) throws -> Void = { try $0.save() }
     ) {
         let form = SettingsForm(credentials: credentials, error: failure)
-        let view = SettingsView(form: form, saveCredentials: saveCredentials) { [weak self] in
+        let view = SettingsView(form: form, saveCredentials: saveCredentials, onLanguageChange: { [weak self] in
+            guard let self else { return }
+            self.installMenus(hotKeyAvailable: self.hotKey != nil)
+        }) { [weak self] in
             self?.settingsWindow?.close()
         }
         let window = NSWindow(contentViewController: NSHostingController(rootView: view))
@@ -401,19 +428,31 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installMenus(hotKeyAvailable: Bool) {
         let menu = NSMenu()
-        let captureTitle = hotKeyAvailable ? "Capturar voz" : "Capturar voz (atalho indisponível)"
+        let captureTitle = hotKeyAvailable ? tr("Capturar voz") : tr("Capturar voz (atalho indisponível)")
         let start = NSMenuItem(title: captureTitle, action: #selector(startCapture), keyEquivalent: hotKeyAvailable ? "." : "")
         start.keyEquivalentModifierMask = [.command, .shift]
         start.target = self
         menu.addItem(start)
-        let settings = NSMenuItem(title: "Ajustes…", action: #selector(showSettings), keyEquivalent: ",")
+        let settings = NSMenuItem(title: tr("Ajustes…"), action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Encerrar Ramble", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Things 3 Ramble")
-        item.button?.image?.isTemplate = true
+        menu.addItem(withTitle: tr("Encerrar Ramble"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let item = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let waveform = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { bounds in
+            NSColor.black.setFill()
+            let barWidth: CGFloat = 3.5
+            let heights: [CGFloat] = [7, 14, 10, 6]
+            for (index, height) in heights.enumerated() {
+                let bar = NSRect(x: 0.5 + CGFloat(index) * 4.5, y: bounds.midY - height / 2,
+                                 width: barWidth, height: height)
+                NSBezierPath(roundedRect: bar, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+            }
+            return true
+        }
+        waveform.isTemplate = true
+        waveform.accessibilityDescription = "Things 3 Ramble"
+        item.button?.image = waveform
         item.button?.toolTip = "Things 3 Ramble"
         item.menu = menu
         statusItem = item
@@ -425,18 +464,18 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let copy = item.copy() as? NSMenuItem { appMenu.addItem(copy) }
         }
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Encerrar Ramble", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: tr("Encerrar Ramble"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         main.addItem(appItem)
         main.setSubmenu(appMenu, for: appItem)
 
         let editItem = NSMenuItem()
-        let edit = NSMenu(title: "Editar")
-        edit.addItem(withTitle: "Desfazer", action: Selector(("undo:")), keyEquivalent: "z")
+        let edit = NSMenu(title: tr("Editar"))
+        edit.addItem(withTitle: tr("Desfazer"), action: Selector(("undo:")), keyEquivalent: "z")
         edit.addItem(.separator())
-        edit.addItem(withTitle: "Recortar", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copiar", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Colar", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Selecionar tudo", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(withTitle: tr("Recortar"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: tr("Copiar"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: tr("Colar"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: tr("Selecionar tudo"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         main.addItem(editItem)
         main.setSubmenu(edit, for: editItem)
         NSApp.mainMenu = main
@@ -445,10 +484,20 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func registerHotKey() -> Bool {
         var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, _, context in
-            guard let context else { return OSStatus(eventNotHandledErr) }
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var id = EventHotKeyID()
+            guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                    nil, MemoryLayout<EventHotKeyID>.size, nil, &id) == noErr,
+                  id.signature == 0x52414D42 else { return OSStatus(eventNotHandledErr) }
             let delegate = Unmanaged<RambleDelegate>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated { delegate.startCapture() }
+            MainActor.assumeIsolated {
+                if id.id == 2 {
+                    if delegate.connectingEscape != nil { delegate.cancelCapture() }
+                } else {
+                    delegate.startCapture()
+                }
+            }
             return noErr
         }, 1, &event, context, &hotKeyHandler)
         guard installed == noErr else { return false }
@@ -456,6 +505,18 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let id = EventHotKeyID(signature: 0x52414D42, id: 1)
         return RegisterEventHotKey(UInt32(kVK_ANSI_Period), UInt32(cmdKey | shiftKey), id,
                                    GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &hotKey) == noErr
+    }
+
+    private func watchConnectingEscape() {
+        guard hotKeyHandler != nil, connectingEscape == nil else { return }
+        let id = EventHotKeyID(signature: 0x52414D42, id: 2)
+        RegisterEventHotKey(UInt32(kVK_Escape), 0, id, GetApplicationEventTarget(),
+                            OptionBits(kEventHotKeyExclusive), &connectingEscape)
+    }
+
+    private func stopConnectingEscape() {
+        if let connectingEscape { UnregisterEventHotKey(connectingEscape) }
+        connectingEscape = nil
     }
 
     #if DEBUG
@@ -481,6 +542,11 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         dismissal?.cancel()
         fixtureActive = true
         panel.resetPreview()
+        if ProcessInfo.processInfo.arguments.contains("--connecting") {
+            watchConnectingEscape()
+            panel.render(.connecting)
+            return
+        }
         let meter = VoiceMeter()
         let contract = SpokenTask(
             title: "Enviar o contrato à Marina",
@@ -490,23 +556,28 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             checklist: ["Revisar a cláusula de pagamento", "Anexar o PDF"]
         )
         let call = SpokenTask(title: "Ligar para a gráfica", notes: nil, deadline: nil, when: "2026-11-12@09:30", checklist: [])
-        panel.render(.listening, meter: meter)
+        panel.render(.listening, meter: meter, demoDestinations: [
+            ThingsDestination(id: "work", name: "Work", isProject: false),
+            ThingsDestination(id: "contracts", name: "Contratos", isProject: true),
+        ])
         fixtureTask = Task {
             for frame in 0... {
                 if Task.isCancelled { return }
                 if frame == 10 { panel.render(.listening, tasks: [contract], meter: meter) }
                 if frame == 25 { panel.render(.listening, tasks: [contract, call], meter: meter) }
-                meter.update(Float(0.56 + 0.35 * sin(Double(frame) * 0.43)))
+                let beat = Double(frame) * 0.43
+                meter.update(Float(max(0, sin(beat)) * (0.62 + 0.26 * sin(beat * 2.7))))
                 try? await Task.sleep(for: .milliseconds(66))
             }
         }
     }
 
     private func finishVisualFixture(confirmed: Bool) {
+        stopConnectingEscape()
         fixtureActive = false
         fixtureTask?.cancel()
         if confirmed {
-            showNotice("Confirmação simulada", success: true)
+            showNotice(tr("Confirmação simulada"), success: true)
         } else {
             panel.orderOut(nil)
         }

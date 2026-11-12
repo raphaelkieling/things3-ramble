@@ -1,5 +1,40 @@
 import Foundation
 
+struct ThingsDestination: Decodable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let isProject: Bool
+
+    static func load() async throws -> [Self] {
+        try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-l", "JavaScript", "-e", """
+                const things = Application("\(ThingsRequest.bundleID)");
+                const areas = things.areas().map(area => ({
+                    id: area.id(), name: area.name(), isProject: false
+                }));
+                const projects = things.projects().filter(project => project.status() === "open").map(project => ({
+                    id: project.id(), name: project.name(), isProject: true
+                }));
+                JSON.stringify(areas.concat(projects));
+                """]
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw RambleError(tr("Permita o acesso ao Things em Privacidade e Segurança → Automação."))
+            }
+            return try JSONDecoder().decode([Self].self, from: data).sorted {
+                $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        }.value
+    }
+}
+
 struct ThingsRequest {
     static let bundleID = "com.culturedcode.ThingsMac"
     private static let callback = "things3ramble://callback"
@@ -13,6 +48,7 @@ struct ThingsRequest {
 
     let id = UUID().uuidString
     let tasks: [SpokenTask]
+    var destinations: [String: ThingsDestination] = [:]
 
     func url(token: String) throws -> URL {
         let operations = tasks.map { task -> [String: Any] in
@@ -20,6 +56,7 @@ struct ThingsRequest {
             attributes["notes"] = task.notes
             attributes["when"] = task.when
             attributes["deadline"] = task.deadline
+            attributes["list-id"] = destinations[task.previewKey]?.id
             if !task.checklist.isEmpty {
                 attributes["checklist-items"] = task.checklist.map {
                     ["type": "checklist-item", "attributes": ["title": $0]]
@@ -38,7 +75,7 @@ struct ThingsRequest {
         ]
         // Some query decoders interpret a literal plus as a space.
         components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        guard let url = components.url else { throw RambleError("Não foi possível montar o link do Things.") }
+        guard let url = components.url else { throw RambleError(tr("Não foi possível montar o link do Things.")) }
         return url
     }
 

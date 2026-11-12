@@ -21,17 +21,31 @@ enum CapturePhase: Equatable {
     case connecting
     case listening
     case finishing
+    case review
     case sending
     case notice(String, success: Bool)
 
     var canCancel: Bool { self != .sending }
-    var canConfirm: Bool { self == .listening || self == .connecting }
+    var canEditTasks: Bool { self == .listening || self == .review }
+    var canConfirm: Bool { canEditTasks || self == .connecting }
 }
 
 @MainActor
 private final class TaskPreview: ObservableObject {
+    enum DestinationList {
+        case unloaded
+        case loading
+        case loaded([ThingsDestination])
+        case failed(String)
+    }
+
     @Published var tasks: [SpokenTask] = []
+    @Published var phase: CapturePhase = .connecting
+    @Published var meter: VoiceMeter?
+    @Published var previewFailed = false
     @Published var expanded: Set<String> = []
+    @Published var destinations: [String: ThingsDestination] = [:]
+    @Published var destinationList = DestinationList.unloaded
 }
 
 @MainActor
@@ -40,12 +54,17 @@ final class CapturePanel: NSPanel {
     var cancel: (() -> Void)?
     private var host: NSHostingController<CaptureView>?
     private var anchorScreen: NSScreen?
-    private var phase: CapturePhase = .connecting
     private let preview = TaskPreview()
     private var resizeTask: Task<Void, Never>?
+    private var destinationTask: Task<Void, Never>?
     private(set) var dismissedTitles: Set<String> = []
+    var destinations: [String: ThingsDestination] { preview.destinations }
+    var visibleTaskKeys: Set<String> { Set(preview.tasks.map(\.previewKey)) }
 
     func resetPreview() {
+        destinationTask?.cancel()
+        preview.destinationList = .unloaded
+        preview.destinations.removeAll()
         dismissedTitles.removeAll()
         preview.expanded.removeAll()
         preview.tasks.removeAll()
@@ -70,36 +89,43 @@ final class CapturePanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         isReleasedWhenClosed = false
         animationBehavior = .none
-        title = "Captura do Ramble"
     }
 
     override var canBecomeKey: Bool { true }
 
-    func render(_ phase: CapturePhase, tasks: [SpokenTask] = [], meter: VoiceMeter? = nil, previewFailed: Bool = false) {
-        self.phase = phase
+    func render(_ phase: CapturePhase, tasks: [SpokenTask] = [], meter: VoiceMeter? = nil,
+                previewFailed: Bool = false, demoDestinations: [ThingsDestination]? = nil) {
+        if let demoDestinations { preview.destinationList = .loaded(demoDestinations) }
         if !isVisible {
             anchorScreen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? .main
         }
         guard let visible = (anchorScreen ?? .main)?.visibleFrame else { return }
 
-        let view = CaptureView(
-            phase: phase, preview: preview, meter: meter, previewFailed: previewFailed,
-            cardWidth: min(408, visible.width - 42),
-            maxCardsHeight: max(150, min(490, visible.height - 154)),
-            confirm: { [weak self] in self?.confirm?() },
-            cancel: { [weak self] in self?.cancel?() },
-            toggleDetails: { [weak self] task in self?.toggleDetails(task) },
-            remove: { [weak self] task in self?.remove(task) }
-        )
-        if let host {
-            host.rootView = view
-        } else {
+        if !isVisible || host == nil {
+            let view = CaptureView(
+                preview: preview,
+                cardWidth: min(408, visible.width - 42),
+                maxCardsHeight: max(150, min(490, visible.height - 154)),
+                confirm: { [weak self] in self?.confirm?() },
+                cancel: { [weak self] in self?.cancel?() },
+                toggleDetails: { [weak self] task in self?.toggleDetails(task) },
+                remove: { [weak self] task in self?.remove(task) },
+                loadDestinations: { [weak self] in self?.loadDestinations() }
+            )
             let host = NSHostingController(rootView: view)
             host.sizingOptions = []
             contentViewController = host
             self.host = host
         }
-        updatePreview(visibleTasks(tasks))
+        withAnimation(isVisible ? animation : nil) {
+            if preview.phase != phase { preview.phase = phase }
+            if preview.meter !== meter { preview.meter = meter }
+            if preview.previewFailed != previewFailed { preview.previewFailed = previewFailed }
+            let tasks = visibleTasks(tasks)
+            if preview.tasks != tasks { preview.tasks = tasks }
+        }
+        title = tr("Captura do Ramble")
+        resize()
         if !isVisible { makeKeyAndOrderFront(nil) }
     }
 
@@ -111,13 +137,32 @@ final class CapturePanel: NSPanel {
     }
 
     private func remove(_ task: SpokenTask) {
-        guard phase == .listening else { return }
+        guard preview.phase.canEditTasks else { return }
         dismissedTitles.insert(task.previewKey)
+        preview.destinations.removeValue(forKey: task.previewKey)
         updatePreview(visibleTasks(preview.tasks))
     }
 
+    private func loadDestinations() {
+        guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: ThingsRequest.bundleID) != nil else {
+            preview.destinationList = .failed(tr("Instale o Things para escolher projetos e áreas."))
+            return
+        }
+        preview.destinationList = .loading
+        destinationTask = Task { [weak self] in
+            do {
+                let destinations = try await ThingsDestination.load()
+                guard !Task.isCancelled else { return }
+                self?.preview.destinationList = .loaded(destinations)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.preview.destinationList = .failed(error.localizedDescription)
+            }
+        }
+    }
+
     private var animation: Animation? {
-        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.19)
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .smooth(duration: 0.24)
     }
 
     private func updatePreview(_ tasks: [SpokenTask]) {
@@ -130,14 +175,15 @@ final class CapturePanel: NSPanel {
     private func resize() {
         resizeTask?.cancel()
         guard let host, let visible = (anchorScreen ?? .main)?.visibleFrame else { return }
-        let root = host.rootView
+        var root = host.rootView
+        root.fillsWindow = false
         let sizing = NSHostingController(rootView: root)
         let size = sizing.sizeThatFits(in: NSSize(width: root.cardWidth + 32, height: root.maxCardsHeight + 120))
         let target = NSRect(x: (visible.midX - size.width / 2).rounded(), y: visible.minY + 42,
                             width: ceil(size.width), height: ceil(size.height))
         if isVisible, animation != nil, (target.height < frame.height || target.width < frame.width) {
             resizeTask = Task {
-                try? await Task.sleep(for: .milliseconds(210))
+                try? await Task.sleep(for: .milliseconds(260))
                 if !Task.isCancelled { setFrame(target, display: true) }
             }
         } else {
@@ -146,9 +192,9 @@ final class CapturePanel: NSPanel {
     }
 
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown, event.keyCode == 53, phase.canCancel {
+        if event.type == .keyDown, event.keyCode == 53, preview.phase.canCancel {
             cancel?()
-        } else if event.type == .keyDown, [36, 76].contains(event.keyCode), phase.canConfirm, !event.isARepeat {
+        } else if event.type == .keyDown, [36, 76].contains(event.keyCode), preview.phase.canConfirm, !event.isARepeat {
             confirm?()
         } else {
             super.sendEvent(event)
@@ -158,16 +204,16 @@ final class CapturePanel: NSPanel {
 
 private struct CaptureView: View {
     @Environment(\.colorScheme) private var scheme
-    let phase: CapturePhase
     @ObservedObject var preview: TaskPreview
-    let meter: VoiceMeter?
-    let previewFailed: Bool
+    var fillsWindow = true
+    private var phase: CapturePhase { preview.phase }
     let cardWidth: CGFloat
     let maxCardsHeight: CGFloat
     let confirm: () -> Void
     let cancel: () -> Void
     let toggleDetails: (SpokenTask) -> Void
     let remove: (SpokenTask) -> Void
+    let loadDestinations: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
@@ -186,6 +232,8 @@ private struct CaptureView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .fixedSize(horizontal: true, vertical: true)
+        .frame(maxWidth: fillsWindow ? .infinity : nil, maxHeight: fillsWindow ? .infinity : nil,
+               alignment: .bottom)
     }
 
     private var cards: some View {
@@ -193,15 +241,24 @@ private struct CaptureView: View {
             ForEach(preview.tasks, id: \.previewKey) { task in
                 TaskCard(
                     task: task, expanded: preview.expanded.contains(task.previewKey),
-                    removable: phase == .listening,
+                    editable: phase.canEditTasks,
+                    destination: Binding(
+                        get: { preview.destinations[task.previewKey] },
+                        set: { preview.destinations[task.previewKey] = $0 }
+                    ),
+                    destinationList: preview.destinationList,
+                    loadDestinations: loadDestinations,
                     toggleDetails: { toggleDetails(task) },
                     remove: { remove(task) }
                 )
-                .transition(.offset(y: 7).combined(with: .opacity))
+                .transition(.asymmetric(
+                    insertion: .offset(y: 10).combined(with: .opacity).combined(with: .scale(scale: 0.97, anchor: .bottom)),
+                    removal: .offset(y: 5).combined(with: .opacity).combined(with: .scale(scale: 0.95, anchor: .bottom))
+                ))
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Prévia das tarefas")
+        .accessibilityLabel(tr("Prévia das tarefas"))
     }
 
     private var controls: some View {
@@ -217,26 +274,29 @@ private struct CaptureView: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .help("Cancelar (Esc)")
-                .accessibilityLabel("Cancelar captura")
+                .help(tr("Cancelar (Esc)"))
+                .accessibilityLabel(tr("Cancelar captura"))
             }
 
             switch phase {
             case .listening:
-                if previewFailed {
-                    Text("Prévia indisponível")
+                if preview.previewFailed {
+                    Text(tr("Prévia indisponível"))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
-                Waveform(meter: meter)
+                Waveform(meter: preview.meter)
                     .foregroundStyle(palette.blue)
-                    .accessibilityLabel("Gravando")
+                    .accessibilityLabel(tr("Gravando"))
             case .connecting:
-                progress("Conectando…")
+                progress(tr("Conectando…"))
             case .finishing:
-                progress("Finalizando…")
+                progress(tr("Finalizando…"))
+            case .review:
+                Text(tr("Revise as tarefas"))
+                    .font(.system(size: 13, weight: .medium))
             case .sending:
-                progress("Enviando ao Things…")
+                progress(tr("Enviando ao Things…"))
             case .notice(let message, let success):
                 if success {
                     Image(systemName: "checkmark.circle.fill")
@@ -251,7 +311,7 @@ private struct CaptureView: View {
                     .frame(maxWidth: 275)
             }
 
-            if phase == .listening {
+            if phase.canEditTasks {
                 Button(action: confirm) {
                     Image(systemName: "return")
                         .font(.system(size: 12, weight: .semibold))
@@ -261,8 +321,8 @@ private struct CaptureView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Adicionar ao Things (Enter)")
-                .accessibilityLabel("Adicionar ao Things")
+                .help(tr("Adicionar ao Things (Enter)"))
+                .accessibilityLabel(tr("Adicionar ao Things"))
             }
         }
         .padding(.horizontal, 10)
@@ -288,60 +348,76 @@ private struct TaskCard: View {
     @Environment(\.colorScheme) private var scheme
     let task: SpokenTask
     let expanded: Bool
-    let removable: Bool
+    let editable: Bool
+    @Binding var destination: ThingsDestination?
+    let destinationList: TaskPreview.DestinationList
+    let loadDestinations: () -> Void
     let toggleDetails: () -> Void
     let remove: () -> Void
 
     var body: some View {
         let palette = RamblePalette(scheme)
-        HStack(alignment: .top, spacing: 10) {
-            RoundedRectangle(cornerRadius: 3)
-                .strokeBorder(.secondary.opacity(0.58), lineWidth: 1.2)
-                .frame(width: 13, height: 13)
-                .padding(.top, 2)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(task.title)
-                    .font(.system(size: 14, weight: .semibold))
-                if expanded, let notes = task.notes {
-                    Text(notes)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineSpacing(2)
-                        .textSelection(.enabled)
-                }
-                if expanded, !task.checklist.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(task.checklist.enumerated()), id: \.offset) { _, item in
-                            Label(item, systemImage: "circle")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(.secondary.opacity(0.58), lineWidth: 1.2)
+                    .frame(width: 13, height: 13)
                     .padding(.top, 2)
-                }
-                if let when = task.when {
-                    dateLabel(when, symbol: "calendar", name: "Agendada para")
-                        .foregroundStyle(palette.blue)
-                }
-                if let deadline = task.deadline {
-                    dateLabel(deadline, symbol: "flag", name: "Prazo")
-                        .foregroundStyle(scheme == .dark ? Color(red: 1, green: 0.53, blue: 0.57) : .red)
-                }
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityHidden(true)
 
-            HStack(spacing: 3) {
-                if task.notes != nil || !task.checklist.isEmpty {
-                    icon(expanded ? "chevron.up" : "chevron.down", label: expanded ? "Recolher detalhes" : "Mostrar detalhes",
-                         action: toggleDetails)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(task.title)
+                        .font(.system(size: 14, weight: .semibold))
+                    if expanded, let notes = task.notes {
+                        Text(notes)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineSpacing(2)
+                            .textSelection(.enabled)
+                    }
+                    if expanded, !task.checklist.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(task.checklist.enumerated()), id: \.offset) { _, item in
+                                Label(item, systemImage: "circle")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.top, 2)
+                    }
                 }
-                if removable {
-                    icon("xmark", label: "Remover tarefa", action: remove)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 3) {
+                    if task.notes != nil || !task.checklist.isEmpty {
+                        icon(expanded ? "chevron.up" : "chevron.down", label: expanded ? tr("Recolher detalhes") : tr("Mostrar detalhes"),
+                             action: toggleDetails)
+                    }
+                    if editable {
+                        icon("xmark", label: tr("Remover tarefa"), action: remove)
+                    }
                 }
             }
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    if let when = task.when {
+                        dateLabel(when, symbol: "calendar", name: tr("Agendada para"))
+                            .foregroundStyle(palette.blue)
+                    }
+                    if let deadline = task.deadline {
+                        dateLabel(deadline, symbol: "flag", name: tr("Prazo"))
+                            .foregroundStyle(scheme == .dark ? Color(red: 1, green: 0.53, blue: 0.57) : .red)
+                    }
+                }
+                .layoutPriority(1)
+                Spacer(minLength: 0)
+                ViewThatFits(in: .horizontal) {
+                    destinationControl.fixedSize(horizontal: true, vertical: false)
+                    destinationControl
+                }
+            }
+            .padding(.leading, 23)
         }
         .padding(.horizontal, 15)
         .padding(.vertical, 11)
@@ -351,6 +427,48 @@ private struct TaskCard: View {
                 .allowsHitTesting(false)
         }
         .shadow(color: .black.opacity(scheme == .dark ? 0.22 : 0.13), radius: 6, y: 2)
+    }
+
+    private var destinationLabel: some View {
+        Label(destination?.name ?? (task.when == nil ? tr("Caixa de Entrada") : tr("Sem projeto ou área")),
+              systemImage: destination.map { $0.isProject ? "checklist" : "square.stack" } ?? "tray")
+            .lineLimit(1)
+    }
+
+    private var destinationControl: some View {
+        Group {
+            if editable {
+                Menu {
+                    Button(task.when == nil ? tr("Caixa de Entrada") : tr("Sem projeto ou área")) { destination = nil }
+                    switch destinationList {
+                    case .unloaded:
+                        Button(tr("Carregar projetos e áreas"), action: loadDestinations)
+                    case .loading:
+                        Text(tr("Carregando projetos e áreas…"))
+                    case .loaded(let choices):
+                        ForEach(choices) { choice in
+                            Button {
+                                destination = choice
+                            } label: {
+                                Label(choice.name, systemImage: choice.isProject ? "checklist" : "square.stack")
+                            }
+                        }
+                        if choices.isEmpty { Text(tr("Nenhum projeto ou área")) }
+                    case .failed(let message):
+                        Text(message)
+                        Button(tr("Tentar novamente"), action: loadDestinations)
+                    }
+                } label: {
+                    destinationLabel
+                }
+                .menuStyle(.borderlessButton)
+                .help(tr("Escolher destino no Things"))
+            } else {
+                destinationLabel
+            }
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
     }
 
     private func icon(_ name: String, label: String, action: @escaping () -> Void) -> some View {
@@ -375,27 +493,31 @@ private struct TaskCard: View {
     private static func displayDate(_ value: String) -> String {
         let parts = value.components(separatedBy: "@")
         let date = parts[0].split(separator: "-").reversed().joined(separator: "/")
-        return parts.count == 2 ? "\(date) às \(parts[1])" : date
+        return parts.count == 2 ? "\(date) · \(parts[1])" : date
     }
 }
 
 private struct Waveform: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let meter: VoiceMeter?
-    private let weights: [Double] = [0.43, 0.75, 1, 0.83, 0.50]
+    private static let quiet = [Float](repeating: 0, count: VoiceMeter.barCount)
+    private static let still: [Float] = [0, 0, 0.05, 0.1, 0.2, 0.4, 0.27, 0.65, 0.5,
+                                        0.74, 0.55, 0.33, 0.42, 0.22, 0.1, 0.05, 0]
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
-            let energy = reduceMotion ? 0.22 : Double(meter?.level ?? 0)
-            HStack(spacing: 4) {
-                ForEach(weights.indices, id: \.self) { index in
-                    let modulation = 0.83 + 0.17 * sin(context.date.timeIntervalSinceReferenceDate * 12 + Double(index))
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { _ in
+            let levels = reduceMotion ? Self.still : (meter?.levels ?? Self.quiet)
+            HStack(spacing: 3) {
+                ForEach(levels.indices, id: \.self) { index in
+                    let level = Double(levels[index])
+                    let edge = Double(min(index, levels.count - 1 - index))
                     Capsule()
-                        .frame(width: 3.5, height: 4.5 + 19 * weights[index] * energy * modulation)
-                        .animation(reduceMotion ? nil : .easeOut(duration: 0.11), value: energy)
+                        .frame(width: 3, height: 3.5 + 20 * level)
+                        .opacity((0.28 + 0.72 * level) * min(1, 0.45 + edge * 0.23))
                 }
             }
-            .frame(width: 58, height: 24)
+            .frame(height: 24)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.085), value: levels)
         }
     }
 }

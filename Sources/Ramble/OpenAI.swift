@@ -100,7 +100,7 @@ struct OpenAI {
             .compactMap(\.text)
             .joined()
         guard response.status == "completed", !text.isEmpty else {
-            throw RambleError("A OpenAI não retornou uma lista de tarefas completa.")
+            throw RambleError(tr("A OpenAI não retornou uma lista de tarefas completa."))
         }
 
         let date = dateFormatter()
@@ -116,7 +116,7 @@ struct OpenAI {
                 .filter { !$0.isEmpty }
             guard title.count <= 4_000, (notes?.count ?? 0) <= 10_000,
                   checklist.count <= 100, checklist.allSatisfy({ $0.count <= 4_000 }) else {
-                throw RambleError("Uma das tarefas excedeu o tamanho aceito pelo Things.")
+                throw RambleError(tr("Uma das tarefas excedeu o tamanho aceito pelo Things."))
             }
             let cleaned = SpokenTask(title: title, notes: notes == "" ? nil : notes, deadline: deadline, when: when, checklist: checklist)
             return seen.insert(cleaned.previewKey).inserted ? cleaned : nil
@@ -158,7 +158,7 @@ struct OpenAI {
 
         let (data, response) = try await session.data(for: request)
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
-            throw RambleError("A OpenAI enviou uma resposta inválida.")
+            throw RambleError(tr("A OpenAI enviou uma resposta inválida."))
         }
         guard (200..<300).contains(status) else { throw Self.httpError(status) }
         return data
@@ -166,9 +166,9 @@ struct OpenAI {
 
     static func httpError(_ status: Int) -> RambleError {
         switch status {
-        case 401, 403: return RambleError("A OpenAI recusou o acesso. Confira a chave e as permissões do projeto.")
-        case 429: return RambleError("A OpenAI atingiu um limite de uso. Confira o saldo e os limites do projeto.")
-        default: return RambleError("A solicitação à OpenAI falhou (HTTP \(status)).")
+        case 401, 403: return RambleError(tr("A OpenAI recusou o acesso. Confira a chave e as permissões do projeto."))
+        case 429: return RambleError(tr("A OpenAI atingiu um limite de uso. Confira o saldo e os limites do projeto."))
+        default: return RambleError(String(format: tr("A solicitação à OpenAI falhou (HTTP %d)."), status))
         }
     }
 }

@@ -15,8 +15,10 @@ final class SettingsForm: ObservableObject {
 
 struct SettingsView: View {
     @Environment(\.colorScheme) private var scheme
+    @AppStorage(RambleLanguage.preference) private var language = RambleLanguage.portuguese
     @ObservedObject var form: SettingsForm
     let saveCredentials: (Credentials) throws -> Void
+    let onLanguageChange: () -> Void
     let onSave: () -> Void
 
     var body: some View {
@@ -29,21 +31,31 @@ struct SettingsView: View {
                     .frame(width: 35, height: 35)
                     .background(palette.blue.opacity(0.11), in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityHidden(true)
-                Text("Ajustes")
+                Text(tr("Ajustes"))
                     .font(.system(size: 23, weight: .bold))
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                field("Chave da API da OpenAI", placeholder: "sk-…", value: $form.openAIKey,
-                      help: "Durante a captura, o Ramble envia áudio e texto à OpenAI para detectar tarefas.")
+                field(tr("Chave da API da OpenAI"), placeholder: "sk-…", value: $form.openAIKey,
+                      help: tr("Durante a captura, o Ramble envia áudio e texto à OpenAI para detectar tarefas."))
 
                 Rectangle().fill(palette.line).frame(height: 1)
 
-                field("Token de URL do Things 3", placeholder: "Cole o token do Things", value: $form.thingsToken,
-                      help: "No Things, abra Ajustes → Geral → Ativar URLs do Things → Gerenciar.")
+                field(tr("Token de URL do Things 3"), placeholder: tr("Cole o token do Things"), value: $form.thingsToken,
+                      help: tr("No Things, abra Ajustes → Geral → Ativar URLs do Things → Gerenciar."))
             }
             .padding(14)
             .background(palette.inset, in: RoundedRectangle(cornerRadius: 12))
+
+            Picker(tr("Idioma"), selection: $language) {
+                ForEach(RambleLanguage.allCases, id: \.self) { option in
+                    Text(option.name).tag(option)
+                }
+            }
+            .onChange(of: language) {
+                form.error = nil
+                onLanguageChange()
+            }
 
             if let error = form.error {
                 Text(error)
@@ -53,12 +65,12 @@ struct SettingsView: View {
             }
 
             HStack(spacing: 6) {
-                Label("Salvos nas Chaves do macOS", systemImage: "lock")
+                Label(tr("Salvos nas Chaves do macOS"), systemImage: "lock")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button(action: save) {
-                    Text("Salvar")
+                    Text(tr("Salvar"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 17)
