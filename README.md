@@ -1,22 +1,22 @@
 # Things 3 Ramble
 
-App de barra de menus para macOS que transcreve sua fala com a OpenAI e mostra uma prévia das tarefas antes de enviá-las ao Things 3.
+A macOS menu bar app that transcribes your speech with OpenAI and previews tasks before sending them to Things 3.
 
-## Compilar e rodar
+## Build and run
 
-Requer macOS 14+ e as ferramentas de linha de comando do Xcode com Swift 6+.
+Requires macOS 14+ and the Xcode Command Line Tools with Swift 6+.
 
 ```sh
 ./build.sh && open "dist/Things 3 Ramble.app"
 ```
 
-Em **Ajustes…** do Ramble, salve a chave da API da OpenAI e o token de URL do Things 3. No Things, o token fica em **Ajustes → Geral → Ativar URLs do Things → Gerenciar**.
+Open **Ajustes…** (Settings) from the Ramble menu and save your OpenAI API key and Things 3 URL token. In Things, find the token under **Settings → General → Enable Things URLs → Manage**.
 
-Pressione **⌘⇧.** e permita o acesso ao microfone na primeira captura. Fale suas tarefas, revise a prévia e pressione **Enter** para enviar ou **Esc** para cancelar.
+Press **⌘⇧.** and grant microphone access on your first capture. Say your tasks, review the preview, then press **Enter** to send or **Esc** to cancel.
 
-## Testar
+## Test
 
 ```sh
-./test.sh          # Testes automatizados
-./build.sh --demo  # Demonstração com dados simulados, sem credenciais ou microfone
+./test.sh          # Automated tests
+./build.sh --demo  # Demo with sample data, no credentials or microphone needed
 ```
