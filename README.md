@@ -2,6 +2,12 @@
 
 A macOS menu bar app that transcribes your speech with OpenAI and previews tasks before sending them to Things 3.
 
+
+<div align="center">
+  <img width="512" height="252" alt="image" src="https://github.com/user-attachments/assets/0562e036-1fd2-4234-9878-19fd80b30043" />
+</div>
+
+
 ## Build and run
 
 Requires macOS 14+ and the Xcode Command Line Tools with Swift 6+.
