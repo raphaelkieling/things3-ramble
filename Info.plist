@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.raphaelkieling.things3ramble</string>
+    <key>CFBundleName</key>
+    <string>Things 3 Ramble</string>
+    <key>CFBundleDisplayName</key>
+    <string>Things 3 Ramble</string>
+    <key>CFBundleExecutable</key>
+    <string>Ramble</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>pt-BR</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>O Ramble usa o microfone para gravar as ações que você quer adicionar ao Things.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLName</key>
+            <string>com.raphaelkieling.things3ramble.callback</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>things3ramble</string></array>
+        </dict>
+    </array>
+</dict>
+</plist>
