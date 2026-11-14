@@ -54,8 +54,8 @@ struct ThingsRequest {
         let operations = tasks.map { task -> [String: Any] in
             var attributes: [String: Any] = ["title": task.title]
             attributes["notes"] = task.notes
-            attributes["when"] = task.when
             attributes["deadline"] = task.deadline
+            attributes["when"] = task.when
             attributes["list-id"] = destinations[task.previewKey]?.id
             if !task.checklist.isEmpty {
                 attributes["checklist-items"] = task.checklist.map {

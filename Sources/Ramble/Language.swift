@@ -17,6 +17,14 @@ enum RambleLanguage: String, CaseIterable {
         case .spanish: "Español"
         }
     }
+
+    var speechLocale: Locale {
+        switch self {
+        case .portuguese: Locale(identifier: "pt-BR")
+        case .english: Locale(identifier: "en-US")
+        case .spanish: Locale(identifier: "es-ES")
+        }
+    }
 }
 
 func tr(_ source: String) -> String {
@@ -28,6 +36,12 @@ func tr(_ source: String) -> String {
 }
 
 private let translations: [String: (english: String, spanish: String)] = [
+    "Modelo da Apple instalado.": ("Apple speech model installed.", "Modelo de Apple instalado."),
+    "Modelo da Apple em download…": ("Downloading Apple speech model…", "Descargando el modelo de Apple…"),
+    "O modelo da Apple será baixado na primeira captura neste idioma.": ("The Apple model downloads on the first capture in this language.", "El modelo de Apple se descarga en la primera captura en este idioma."),
+    "Vocabulário personalizado": ("Custom vocabulary", "Vocabulario personalizado"),
+    "Um termo por linha, até 120 caracteres. No modo GPT, a lista vai para a OpenAI.": ("One term per line, up to 120 characters. GPT mode sends the list to OpenAI.", "Un término por línea, hasta 120 caracteres. El modo GPT envía la lista a OpenAI."),
+    "Registrar tempos localmente": ("Record timings locally", "Registrar tiempos localmente"),
     "Ajustes": ("Settings", "Ajustes"),
     "Ajustes…": ("Settings…", "Ajustes…"),
     "Idioma": ("Language", "Idioma"),
@@ -42,7 +56,12 @@ private let translations: [String: (english: String, spanish: String)] = [
     "Encerrar Ramble": ("Quit Ramble", "Salir de Ramble"),
     "Captura do Ramble": ("Ramble Capture", "Captura de Ramble"),
     "Chave da API da OpenAI": ("OpenAI API key", "Clave de API de OpenAI"),
-    "Durante a captura, o Ramble envia áudio e texto à OpenAI para detectar tarefas.": ("During capture, Ramble sends audio and text to OpenAI to identify tasks.", "Durante la captura, Ramble envía audio y texto a OpenAI para identificar tareas."),
+    "A OpenAI extrai as tarefas do texto. A opção GPT também envia o áudio à OpenAI.": ("OpenAI extracts tasks from the text. The GPT option also sends audio to OpenAI.", "OpenAI extrae las tareas del texto. La opción GPT también envía el audio a OpenAI."),
+    "Transcrição": ("Transcription", "Transcripción"),
+    "Apple (no Mac)": ("Apple (on Mac)", "Apple (en el Mac)"),
+    "Mostrar transcrição ao vivo": ("Show live transcript", "Mostrar transcripción en directo"),
+    "A transcrição da Apple não está disponível neste Mac. Escolha GPT.": ("Apple transcription is unavailable on this Mac. Choose GPT.", "La transcripción de Apple no está disponible en este Mac. Elige GPT."),
+    "A transcrição da Apple não está disponível para este idioma ou Mac. Escolha GPT nos Ajustes.": ("Apple transcription is unavailable for this language or Mac. Choose GPT in Settings.", "La transcripción de Apple no está disponible para este idioma o Mac. Elige GPT en Ajustes."),
     "Token de URL do Things 3": ("Things 3 URL token", "Token de URL de Things 3"),
     "Cole o token do Things": ("Paste the Things token", "Pega el token de Things"),
     "No Things, abra Ajustes → Geral → Ativar URLs do Things → Gerenciar.": ("In Things, go to Settings → General → Enable Things URLs → Manage.", "En Things, ve a Ajustes → General → Activar URLs de Things → Gestionar."),
@@ -53,18 +72,18 @@ private let translations: [String: (english: String, spanish: String)] = [
     "Cancelar captura": ("Cancel capture", "Cancelar captura"),
     "Prévia indisponível": ("Preview unavailable", "Vista previa no disponible"),
     "Gravando": ("Recording", "Grabando"),
-    "Conectando…": ("Connecting…", "Conectando…"),
+    "Preparando transcrição…": ("Preparing transcription…", "Preparando la transcripción…"),
     "Finalizando…": ("Finishing…", "Finalizando…"),
     "Revise as tarefas": ("Review tasks", "Revisa las tareas"),
     "Enviando ao Things…": ("Sending to Things…", "Enviando a Things…"),
     "Adicionar ao Things (Enter)": ("Add to Things (Enter)", "Añadir a Things (Intro)"),
     "Adicionar ao Things": ("Add to Things", "Añadir a Things"),
-    "Agendada para": ("Scheduled for", "Programada para"),
     "Prazo": ("Deadline", "Fecha límite"),
     "Recolher detalhes": ("Hide details", "Ocultar detalles"),
     "Mostrar detalhes": ("Show details", "Mostrar detalles"),
     "Remover tarefa": ("Remove task", "Eliminar tarea"),
     "Caixa de Entrada": ("Inbox", "Bandeja de entrada"),
+    "Agendada para": ("Scheduled for", "Programada para"),
     "Sem projeto ou área": ("No project or area", "Sin proyecto ni área"),
     "Carregar projetos e áreas": ("Load projects and areas", "Cargar proyectos y áreas"),
     "Carregando projetos e áreas…": ("Loading projects and areas…", "Cargando proyectos y áreas…"),
@@ -76,7 +95,9 @@ private let translations: [String: (english: String, spanish: String)] = [
     "Não foi possível montar o link do Things.": ("Couldn't create the Things link.", "No se pudo crear el enlace de Things."),
     "Ative o microfone em Ajustes do Sistema → Privacidade e Segurança → Microfone.": ("Enable microphone access in System Settings → Privacy & Security → Microphone.", "Activa el acceso al micrófono en Ajustes del Sistema → Privacidad y seguridad → Micrófono."),
     "A conexão com a OpenAI demorou demais.": ("The connection to OpenAI timed out.", "Se agotó el tiempo de conexión con OpenAI."),
-    "A OpenAI demorou para concluir a transcrição.": ("OpenAI took too long to finish transcribing.", "OpenAI tardó demasiado en terminar la transcripción."),
+    "A transcrição demorou para terminar.": ("Transcription took too long to finish.", "La transcripción tardó demasiado en terminar."),
+    "Não foi possível preparar a transcrição local.": ("Couldn't prepare local transcription.", "No se pudo preparar la transcripción local."),
+    "Não foi possível transcrever a gravação no Mac.": ("Couldn't transcribe the recording on this Mac.", "No se pudo transcribir la grabación en este Mac."),
     "Nenhuma ação encontrada.": ("No tasks found.", "No se encontraron tareas."),
     "Abra ou instale o Things 3 neste Mac para adicionar as tarefas.": ("Open or install Things 3 on this Mac to add tasks.", "Abre o instala Things 3 en este Mac para añadir tareas."),
     "1 tarefa adicionada ao Things": ("1 task added to Things", "1 tarea añadida a Things"),
@@ -94,7 +115,7 @@ private let translations: [String: (english: String, spanish: String)] = [
     "Confira a entrada de áudio nos Ajustes do Sistema.": ("Check your audio input in System Settings.", "Comprueba la entrada de audio en Ajustes del Sistema."),
     "A entrada de áudio mudou durante a captura.": ("The audio input changed during capture.", "La entrada de audio cambió durante la captura."),
     "Nenhum microfone disponível. Confira a entrada de áudio do Mac.": ("No microphone available. Check your Mac's audio input.", "No hay micrófono disponible. Comprueba la entrada de audio del Mac."),
-    "A conexão ficou lenta demais para transmitir a gravação.": ("The connection was too slow to stream the recording.", "La conexión era demasiado lenta para transmitir la grabación."),
+    "A transcrição não acompanhou a gravação.": ("Transcription couldn't keep up with the recording.", "La transcripción no pudo seguir el ritmo de la grabación."),
     "Não foi possível preparar o áudio.": ("Couldn't prepare the audio.", "No se pudo preparar el audio."),
     "A OpenAI não conseguiu transcrever a gravação.": ("OpenAI couldn't transcribe the recording.", "OpenAI no pudo transcribir la grabación."),
     "A conexão de áudio foi encerrada.": ("The audio connection closed.", "Se cerró la conexión de audio."),

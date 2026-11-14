@@ -43,6 +43,8 @@ private final class TaskPreview: ObservableObject {
     @Published var phase: CapturePhase = .connecting
     @Published var meter: VoiceMeter?
     @Published var previewFailed = false
+    @Published var transcript = ""
+    @Published var hoveredCard: String?
     @Published var expanded: Set<String> = []
     @Published var destinations: [String: ThingsDestination] = [:]
     @Published var destinationList = DestinationList.unloaded
@@ -59,7 +61,6 @@ final class CapturePanel: NSPanel {
     private var destinationTask: Task<Void, Never>?
     private(set) var dismissedTitles: Set<String> = []
     var destinations: [String: ThingsDestination] { preview.destinations }
-    var visibleTaskKeys: Set<String> { Set(preview.tasks.map(\.previewKey)) }
 
     func resetPreview() {
         destinationTask?.cancel()
@@ -68,6 +69,15 @@ final class CapturePanel: NSPanel {
         dismissedTitles.removeAll()
         preview.expanded.removeAll()
         preview.tasks.removeAll()
+        preview.transcript = ""
+        preview.hoveredCard = nil
+    }
+
+    func updateTranscript(_ text: String) {
+        guard let view = host?.rootView, view.showsTranscript, preview.transcript != text else { return }
+        let visibilityChanged = preview.transcript.isEmpty != text.isEmpty
+        preview.transcript = text
+        if visibilityChanged { resize() }
     }
 
     func visibleTasks(_ tasks: [SpokenTask]) -> [SpokenTask] {
@@ -94,7 +104,8 @@ final class CapturePanel: NSPanel {
     override var canBecomeKey: Bool { true }
 
     func render(_ phase: CapturePhase, tasks: [SpokenTask] = [], meter: VoiceMeter? = nil,
-                previewFailed: Bool = false, demoDestinations: [ThingsDestination]? = nil) {
+                previewFailed: Bool = false, demoDestinations: [ThingsDestination]? = nil,
+                onViewUpdate: (() -> Void)? = nil) {
         if let demoDestinations { preview.destinationList = .loaded(demoDestinations) }
         if !isVisible {
             anchorScreen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? .main
@@ -102,10 +113,12 @@ final class CapturePanel: NSPanel {
         guard let visible = (anchorScreen ?? .main)?.visibleFrame else { return }
 
         if !isVisible || host == nil {
+            let showsTranscript = UserDefaults.standard.object(forKey: TranscriptionProvider.showTranscriptPreference) as? Bool ?? true
             let view = CaptureView(
                 preview: preview,
+                showsTranscript: showsTranscript,
                 cardWidth: min(408, visible.width - 42),
-                maxCardsHeight: max(150, min(490, visible.height - 154)),
+                maxCardsHeight: max(150, min(490, visible.height - (showsTranscript ? 234 : 154))),
                 confirm: { [weak self] in self?.confirm?() },
                 cancel: { [weak self] in self?.cancel?() },
                 toggleDetails: { [weak self] task in self?.toggleDetails(task) },
@@ -127,6 +140,10 @@ final class CapturePanel: NSPanel {
         title = tr("Captura do Ramble")
         resize()
         if !isVisible { makeKeyAndOrderFront(nil) }
+        if let onViewUpdate {
+            displayIfNeeded()
+            onViewUpdate()
+        }
     }
 
     private func toggleDetails(_ task: SpokenTask) {
@@ -204,9 +221,11 @@ final class CapturePanel: NSPanel {
 
 private struct CaptureView: View {
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var preview: TaskPreview
     var fillsWindow = true
     private var phase: CapturePhase { preview.phase }
+    let showsTranscript: Bool
     let cardWidth: CGFloat
     let maxCardsHeight: CGFloat
     let confirm: () -> Void
@@ -227,6 +246,9 @@ private struct CaptureView: View {
                 .frame(maxHeight: maxCardsHeight)
                 .transition(.offset(y: 7).combined(with: .opacity))
             }
+            if showsTranscript, phase == .listening, !preview.transcript.isEmpty {
+                transcript
+            }
             controls
         }
         .padding(.horizontal, 16)
@@ -236,9 +258,28 @@ private struct CaptureView: View {
                alignment: .bottom)
     }
 
+    private var transcript: some View {
+        let palette = RamblePalette(scheme)
+        return Text(verbatim: preview.transcript)
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+            .lineLimit(3, reservesSpace: true)
+            .truncationMode(.head)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 9)
+            .frame(width: (cardWidth * 0.84).rounded())
+            .background(palette.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12).strokeBorder(palette.line, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+    }
+
     private var cards: some View {
         VStack(spacing: 6) {
             ForEach(preview.tasks, id: \.previewKey) { task in
+                let lifted = fillsWindow && phase.canEditTasks && preview.hoveredCard == task.previewKey
                 TaskCard(
                     task: task, expanded: preview.expanded.contains(task.previewKey),
                     editable: phase.canEditTasks,
@@ -251,6 +292,16 @@ private struct CaptureView: View {
                     toggleDetails: { toggleDetails(task) },
                     remove: { remove(task) }
                 )
+                .offset(y: lifted && !reduceMotion ? -2 : 0)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: lifted)
+                .onHover { isHovering in
+                    guard fillsWindow else { return }
+                    if isHovering {
+                        preview.hoveredCard = task.previewKey
+                    } else if preview.hoveredCard == task.previewKey {
+                        preview.hoveredCard = nil
+                    }
+                }
                 .transition(.asymmetric(
                     insertion: .offset(y: 10).combined(with: .opacity).combined(with: .scale(scale: 0.97, anchor: .bottom)),
                     removal: .offset(y: 5).combined(with: .opacity).combined(with: .scale(scale: 0.95, anchor: .bottom))
@@ -289,7 +340,7 @@ private struct CaptureView: View {
                     .foregroundStyle(palette.blue)
                     .accessibilityLabel(tr("Gravando"))
             case .connecting:
-                progress(tr("Conectando…"))
+                progress(tr("Preparando transcrição…"))
             case .finishing:
                 progress(tr("Finalizando…"))
             case .review:
@@ -401,13 +452,13 @@ private struct TaskCard: View {
             }
             HStack(spacing: 10) {
                 HStack(spacing: 8) {
-                    if let when = task.when {
-                        dateLabel(when, symbol: "calendar", name: tr("Agendada para"))
-                            .foregroundStyle(palette.blue)
-                    }
                     if let deadline = task.deadline {
                         dateLabel(deadline, symbol: "flag", name: tr("Prazo"))
                             .foregroundStyle(scheme == .dark ? Color(red: 1, green: 0.53, blue: 0.57) : .red)
+                    }
+                    if let when = task.when {
+                        dateLabel(when, symbol: "calendar", name: tr("Agendada para"))
+                            .foregroundStyle(palette.blue)
                     }
                 }
                 .layoutPriority(1)
@@ -430,16 +481,20 @@ private struct TaskCard: View {
     }
 
     private var destinationLabel: some View {
-        Label(destination?.name ?? (task.when == nil ? tr("Caixa de Entrada") : tr("Sem projeto ou área")),
+        Label(destination?.name ?? defaultDestinationName,
               systemImage: destination.map { $0.isProject ? "checklist" : "square.stack" } ?? "tray")
             .lineLimit(1)
+    }
+
+    private var defaultDestinationName: String {
+        task.when == nil ? tr("Caixa de Entrada") : tr("Sem projeto ou área")
     }
 
     private var destinationControl: some View {
         Group {
             if editable {
                 Menu {
-                    Button(task.when == nil ? tr("Caixa de Entrada") : tr("Sem projeto ou área")) { destination = nil }
+                    Button(defaultDestinationName) { destination = nil }
                     switch destinationList {
                     case .unloaded:
                         Button(tr("Carregar projetos e áreas"), action: loadDestinations)

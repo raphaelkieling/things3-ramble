@@ -16,9 +16,28 @@ struct SpokenTask: Codable, Hashable, Sendable {
     let when: String?
     let checklist: [String]
 
+    init(title: String, notes: String?, deadline: String?, when: String? = nil, checklist: [String]) {
+        self.title = title
+        self.notes = notes
+        self.deadline = deadline
+        self.when = when
+        self.checklist = checklist
+    }
+
     var previewKey: String {
         title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
+}
+
+struct ExtractionProfile: Sendable {
+    var model = "gpt-6.1-sol"
+    var serviceTier = "ultrafast"
+    var effort = "low"
+}
+
+struct ExtractionUsage: Decodable, Sendable {
+    let input_tokens: Int
+    let output_tokens: Int
 }
 
 struct OpenAI {
@@ -26,7 +45,8 @@ struct OpenAI {
     static let network = URLSession(configuration: .ephemeral)
     var session: URLSession = Self.network
 
-    func extractTasks(from transcript: String, today: Date = .now, dismissed: Set<String> = []) async throws -> [SpokenTask] {
+    func extract(from transcript: String, today: Date, dismissed: Set<String> = [],
+                 profile: ExtractionProfile = .init()) async throws -> (tasks: [SpokenTask], usage: ExtractionUsage?) {
         let date = Self.dateFormatter()
         let dateContext = date.string(from: today)
         let exclusions = String(decoding: try JSONEncoder().encode(dismissed.sorted()), as: UTF8.self)
@@ -39,9 +59,10 @@ struct OpenAI {
             Preserve explicitly spoken details in notes in the speaker's language. Use short paragraphs and Markdown bullets when useful. Use null when there are no notes.
             Use checklist for explicit substeps that belong to one task, never for unrelated actions. Use an empty array when there are no checklist items.
             The speaker's local date is \(dateContext). Resolve clear relative dates against that date.
-            Use deadline (YYYY-MM-DD) for an explicit due date and when (YYYY-MM-DD or YYYY-MM-DD@HH:mm) for an explicit start or reminder.
-            If a date or time is ambiguous, leave the date field null and keep the wording in notes. If a deadline includes a time, preserve the time in notes.
-            Do not invent dates, notes, steps, or tasks.
+            If the speaker gives a specific clock time for the task, use when (YYYY-MM-DD@HH:mm, 24-hour time) and leave deadline null. Use the local date above if no day is mentioned. For example, "ligar meio-dia" schedules today at 12:00, and "sexta ao meio-dia" schedules Friday at 12:00. Treat noon and midnight as specific clock times (12:00 and 00:00).
+            If the speaker gives a clear day without a specific clock time, use deadline (YYYY-MM-DD) and leave when null. For example, "sexta" or "sexta de manhã" is a deadline; keep "de manhã" in notes.
+            If a mentioned day is ambiguous, leave both date fields null and preserve any timing details in notes. If no day or specific clock time is given, leave both fields null and keep any vague timing in notes. Never infer a clock time from a vague time of day.
+            Do not invent dates beyond the local-date rule above, notes, steps, or tasks.
             Exclude actions the user removed manually, even if their titles could be rephrased. Removed titles: \(exclusions).
             """
         let nullableString = ["type": ["string", "null"]]
@@ -64,15 +85,17 @@ struct OpenAI {
             "additionalProperties": false,
         ]
         let payload: [String: Any] = [
-            "model": "gpt-5.6-luna",
+            "model": profile.model,
+            "service_tier": profile.serviceTier,
             "store": false,
-            "reasoning": ["effort": "none"],
+            "reasoning": ["effort": profile.effort],
             "instructions": instructions,
             "input": transcript,
             "text": ["format": ["type": "json_schema", "name": "tasks", "schema": schema, "strict": true]],
         ]
         let data = try await post("responses", body: JSONSerialization.data(withJSONObject: payload))
-        return try Self.decodeTasks(data)
+        struct UsageEnvelope: Decodable { let usage: ExtractionUsage? }
+        return (try Self.decodeTasks(data), try? JSONDecoder().decode(UsageEnvelope.self, from: data).usage)
     }
 
     static func decodeTasks(_ data: Data) throws -> [SpokenTask] {
@@ -110,8 +133,8 @@ struct OpenAI {
             guard !title.isEmpty else { return nil }
 
             let notes = task.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let deadline = task.deadline.flatMap { validDate($0, with: date) ? $0 : nil }
             let when = task.when.flatMap { validSchedule($0, with: date) ? $0 : nil }
+            let deadline = when == nil ? task.deadline.flatMap { validDate($0, with: date) ? $0 : nil } : nil
             let checklist = task.checklist.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
                 .filter { !$0.isEmpty }
             guard title.count <= 4_000, (notes?.count ?? 0) <= 10_000,
@@ -130,13 +153,8 @@ struct OpenAI {
 
     private static func validSchedule(_ value: String, with formatter: DateFormatter) -> Bool {
         let parts = value.components(separatedBy: "@")
-        guard validDate(parts[0], with: formatter) else { return false }
-        if parts.count == 1 { return true }
-
-        guard parts.count == 2, parts[1].range(of: #"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"#, options: .regularExpression) != nil else {
-            return false
-        }
-        return true
+        guard parts.count == 2, validDate(parts[0], with: formatter) else { return false }
+        return parts[1].range(of: #"^(?:[01][0-9]|2[0-3]):[0-5][0-9]\z"#, options: .regularExpression) != nil
     }
 
     private static func dateFormatter() -> DateFormatter {

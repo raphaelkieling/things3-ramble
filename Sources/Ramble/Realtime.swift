@@ -1,3 +1,4 @@
+import AVFAudio
 import Foundation
 
 struct TranscriptEvent: Decodable, Sendable {
@@ -47,11 +48,12 @@ struct TranscriptTurn {
 
 struct RealtimeTranscriber {
     let apiKey: String
+    var vocabulary: [String] = []
 
     func run(
-        audio: AsyncThrowingStream<Data, Error>,
+        audio: AsyncThrowingStream<CapturedAudio, Error>,
         onReady: @escaping @Sendable () async -> Void,
-        onPartial: @escaping @Sendable (String) async -> Void
+        onPartial: @escaping @Sendable (TranscriptUpdate) async -> Void
     ) async throws -> String {
         var request = URLRequest(url: URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -61,13 +63,15 @@ struct RealtimeTranscriber {
         return try await withTaskCancellationHandler {
             defer { socket.cancel(with: .goingAway, reason: nil) }
             do {
+                var transcription: [String: Any] = ["model": "gpt-live-transcribe", "delay": "minimal"]
+                if !vocabulary.isEmpty { transcription["keywords"] = vocabulary }
                 try await Self.send([
                     "type": "session.update",
                     "session": [
                         "type": "transcription",
                         "audio": ["input": [
                             "format": ["type": "audio/pcm", "rate": 24_000],
-                            "transcription": ["model": "gpt-live-transcribe", "delay": "minimal"],
+                            "transcription": transcription,
                             "turn_detection": NSNull(),
                         ]],
                     ],
@@ -80,8 +84,13 @@ struct RealtimeTranscriber {
                 return try await withThrowingTaskGroup(of: String?.self) { group in
                     group.addTask {
                         var bytes = 0
-                        for try await chunk in audio {
+                        for try await captured in audio {
                             try Task.checkCancellation()
+                            let buffer = captured.buffer
+                            guard let channel = buffer.int16ChannelData?.pointee else {
+                                throw RambleError(tr("Não foi possível preparar o áudio."))
+                            }
+                            let chunk = Data(bytes: channel, count: Int(buffer.frameLength) * MemoryLayout<Int16>.size)
                             try await Self.send(["type": "input_audio_buffer.append", "audio": chunk.base64EncodedString()], to: socket)
                             bytes += chunk.count
                         }
@@ -99,8 +108,13 @@ struct RealtimeTranscriber {
                                 throw RambleError(tr("A OpenAI não conseguiu transcrever a gravação."))
                             }
                             let update = turn.apply(event)
-                            if let partial = update.partial { await onPartial(partial) }
-                            if let final = update.final { return final.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            if let partial = update.partial {
+                                await onPartial(TranscriptUpdate(text: partial, segment: event.itemID ?? "turn"))
+                            }
+                            if let final = update.final {
+                                await onPartial(TranscriptUpdate(text: final, segment: event.itemID ?? "turn", isFinal: true))
+                                return final.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }
                         }
                     }
 

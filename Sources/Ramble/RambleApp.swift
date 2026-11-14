@@ -20,6 +20,11 @@ private final class CaptureRun {
     let credentials: Credentials
     let audio: AudioCapture
     let date = Date()
+    let vocabulary = Vocabulary.current
+    let timing: CaptureTiming?
+    var revision = 0
+    var segment = "turn"
+    var rangeEnd: Double?
     var finishing = false
     var transcript = ""
     var preview: [SpokenTask] = []
@@ -29,17 +34,18 @@ private final class CaptureRun {
     var renderedTranscript = ""
     var renderedDismissals: Set<String> = []
     var previewTask: Task<Void, Never>?
-    var socketTask: Task<Void, Never>?
+    var transcriptionTask: Task<Void, Never>?
     var timeoutTask: Task<Void, Never>?
 
-    init(id: UUID, credentials: Credentials, audio: AudioCapture) {
+    init(id: UUID, credentials: Credentials, audio: AudioCapture, timing: CaptureTiming?) {
         self.id = id
         self.credentials = credentials
         self.audio = audio
+        self.timing = timing
     }
 
     func cancel() {
-        socketTask?.cancel()
+        transcriptionTask?.cancel()
         previewTask?.cancel()
         timeoutTask?.cancel()
         audio.stop()
@@ -55,6 +61,8 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var connectingEscape: EventHotKeyRef?
     private var hotKeyHandler: EventHandlerRef?
     private var pendingPermission: UUID?
+    private var pendingTiming: CaptureTiming?
+    private var measuredConfigurations: Set<String> = []
     private var capture: CaptureRun?
     private var delivery: ThingsRequest?
     private var deliveryTimeout: Task<Void, Never>?
@@ -104,6 +112,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func startCapture() {
+        let triggered = ContinuousClock.now
         #if DEBUG
         if fixtureEnabled {
             settingsWindow?.close()
@@ -135,6 +144,14 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.resetPreview()
         let id = UUID()
         pendingPermission = id
+        if UserDefaults.standard.bool(forKey: "recordTimings") {
+            let provider = TranscriptionProvider.current.rawValue
+            let language = RambleLanguage.current.rawValue
+            let first = measuredConfigurations.insert("\(provider):\(language)").inserted
+            pendingTiming = CaptureTiming(transcriber: provider, model: ExtractionProfile().model, language: language,
+                                          strategy: "current", first: first, vocabulary: !Vocabulary.current.isEmpty)
+            pendingTiming?.mark("trigger", at: triggered)
+        }
         watchConnectingEscape()
         panel.render(.connecting)
         Task {
@@ -143,39 +160,26 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pendingPermission = nil
             guard allowed else {
                 stopConnectingEscape()
+                persistTiming(pendingTiming, outcome: "failure")
+                pendingTiming = nil
                 showNotice(tr("Ative o microfone em Ajustes do Sistema → Privacidade e Segurança → Microfone."))
                 return
             }
-            do {
-                let audio = AudioCapture()
-                try audio.start()
-                let run = CaptureRun(id: id, credentials: credentials, audio: audio)
-                capture = run
-                panel.makeKeyAndOrderFront(nil)
-                connect(run)
-            } catch {
-                stopConnectingEscape()
-                showNotice(message(for: error))
-            }
+            let run = CaptureRun(id: id, credentials: credentials, audio: AudioCapture(), timing: pendingTiming)
+            pendingTiming = nil
+            capture = run
+            transcribe(run)
         }
     }
 
-    private func connect(_ run: CaptureRun) {
+    private func transcribe(_ run: CaptureRun) {
         let id = run.id
-        let stream = run.audio.stream
-        let realtime = RealtimeTranscriber(apiKey: run.credentials.openAIKey)
-        run.timeoutTask = Task {
-            try? await Task.sleep(for: .seconds(15))
-            guard !Task.isCancelled, capture?.id == id else { return }
-            failCapture(tr("A conexão com a OpenAI demorou demais."))
+        let onPartial: @Sendable (TranscriptUpdate) async -> Void = { [weak self] partial in
+            await self?.receiveTranscript(partial, id: id)
         }
-        run.socketTask = Task { [self] in
+        run.transcriptionTask = Task {
             do {
-                let transcript = try await realtime.run(audio: stream, onReady: { [weak self] in
-                    await self?.transcriptionReady(id)
-                }, onPartial: { [weak self] partial in
-                    await self?.receiveTranscript(partial, id: id)
-                })
+                let transcript = try await runTranscriber(run, onPartial: onPartial)
                 guard let current = capture, current.id == id, current.finishing, !Task.isCancelled else { return }
                 current.timeoutTask?.cancel()
                 try await finalize(current, transcript: transcript)
@@ -186,16 +190,71 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    private func runTranscriber(_ run: CaptureRun, onPartial: @escaping @Sendable (TranscriptUpdate) async -> Void) async throws -> String {
+        if TranscriptionProvider.current == .apple {
+            guard #available(macOS 26, *) else {
+                throw RambleError(tr("A transcrição da Apple não está disponível neste Mac. Escolha GPT."))
+            }
+            let local: LocalTranscriber?
+            do {
+                local = try await LocalTranscriber.prepare(locale: RambleLanguage.current.speechLocale, vocabulary: run.vocabulary)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw RambleError(tr("Não foi possível preparar a transcrição local."))
+            }
+            try Task.checkCancellation()
+            if let local {
+                guard !run.finishing else { return "" }
+                try run.audio.start(format: local.format, timing: run.timing)
+                transcriptionReady(run.id)
+                do {
+                    return try await local.run(audio: run.audio.stream, onPartial: onPartial)
+                } catch let error as RambleError {
+                    throw error
+                } catch {
+                    throw RambleError(tr("Não foi possível transcrever a gravação no Mac."))
+                }
+            }
+            throw RambleError(tr("A transcrição da Apple não está disponível para este idioma ou Mac. Escolha GPT nos Ajustes."))
+        }
+
+        guard !run.finishing else { return "" }
+        try run.audio.start(timing: run.timing)
+        let id = run.id
+        run.timeoutTask = Task {
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, capture?.id == id else { return }
+            failCapture(tr("A conexão com a OpenAI demorou demais."))
+        }
+        return try await RealtimeTranscriber(apiKey: run.credentials.openAIKey, vocabulary: run.vocabulary).run(
+            audio: run.audio.stream,
+            onReady: { [weak self] in await self?.transcriptionReady(id) },
+            onPartial: onPartial
+        )
+    }
+
     private func transcriptionReady(_ id: UUID) {
         guard let run = capture, run.id == id, !run.finishing else { return }
         stopConnectingEscape()
+        run.timing?.mark("ready")
         run.timeoutTask?.cancel()
         panel.render(.listening, meter: run.audio.meter)
     }
 
-    private func receiveTranscript(_ transcript: String, id: UUID) {
-        guard let run = capture, run.id == id, !run.finishing else { return }
-        run.transcript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func receiveTranscript(_ update: TranscriptUpdate, id: UUID) {
+        guard let run = capture, run.id == id else { return }
+        run.timing?.mark(update.isFinal ? "segment_final" : "segment_partial",
+                         segment: update.segment, audioEndMS: update.audioEndMS)
+        guard !run.finishing else { return }
+        let transcript = update.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard transcript != run.transcript else { return }
+        run.revision += 1
+        run.segment = update.segment
+        run.rangeEnd = update.audioEndMS
+        run.timing?.mark("transcript", segment: "\(run.segment)/\(run.revision)", audioEndMS: run.rangeEnd)
+        run.transcript = transcript
+        panel.updateTranscript(run.transcript)
         queuePreview(run)
     }
 
@@ -209,16 +268,24 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let snapshot = run.transcript
                 run.requestedTranscript = snapshot
                 let dismissed = panel.dismissedTitles
-                let tasks = try await OpenAI(apiKey: run.credentials.openAIKey).extractTasks(from: snapshot, today: run.date, dismissed: dismissed)
+                let segment = "\(run.segment)/\(run.revision)"
+                run.timing?.mark("extract_start", segment: segment)
+                let result = try await OpenAI(apiKey: run.credentials.openAIKey).extract(from: snapshot, today: run.date, dismissed: dismissed)
+                run.timing?.mark("extract_end", segment: segment, usage: result.usage)
+                let tasks = result.tasks
                 guard capture?.id == id, !run.finishing, !Task.isCancelled else { return }
                 let changed = tasks != run.preview || run.previewFailed
                 run.preview = tasks
                 run.renderedTranscript = snapshot
                 run.renderedDismissals = dismissed
                 run.previewFailed = false
-                if changed { panel.render(.listening, tasks: tasks, meter: run.audio.meter) }
+                if changed {
+                    panel.render(.listening, tasks: tasks, meter: run.audio.meter,
+                                 onViewUpdate: { run.timing?.mark("preview", segment: segment) })
+                }
             } catch {
                 guard capture?.id == id, !run.finishing, !Task.isCancelled else { return }
+                run.timing?.mark("preview_failure")
                 run.previewFailed = true
                 panel.render(.listening, tasks: run.preview, meter: run.audio.meter, previewFailed: true)
             }
@@ -238,6 +305,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         guard !run.finishing else { return }
         stopConnectingEscape()
+        run.timing?.mark("enter")
         run.finishing = true
         run.audio.stop()
         run.previewTask?.cancel()
@@ -248,27 +316,34 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         run.timeoutTask = Task {
             try? await Task.sleep(for: .seconds(15))
             guard !Task.isCancelled, capture?.id == id else { return }
-            failCapture(tr("A OpenAI demorou para concluir a transcrição."))
+            failCapture(tr("A transcrição demorou para terminar."))
         }
     }
 
     private func finalize(_ run: CaptureRun, transcript: String) async throws {
+        run.timing?.mark("final_transcript", segment: "final")
         let tasks: [SpokenTask]
         if transcript.isEmpty {
             tasks = []
         } else if transcript == run.renderedTranscript, run.renderedDismissals == panel.dismissedTitles {
             tasks = run.preview
         } else {
-            tasks = try await OpenAI(apiKey: run.credentials.openAIKey).extractTasks(from: transcript, today: run.date, dismissed: panel.dismissedTitles)
+            run.timing?.mark("extract_start", segment: "final")
+            let result = try await OpenAI(apiKey: run.credentials.openAIKey).extract(from: transcript, today: run.date, dismissed: panel.dismissedTitles)
+            run.timing?.mark("extract_end", segment: "final", usage: result.usage)
+            tasks = result.tasks
         }
         guard capture?.id == run.id, !Task.isCancelled else { return }
-        run.socketTask = nil
+        run.transcriptionTask = nil
         let visible = panel.visibleTasks(tasks)
-        if !visible.isEmpty, Set(visible.map(\.previewKey)) != panel.visibleTaskKeys {
+        if !visible.isEmpty, Set(visible) != Set(panel.visibleTasks(run.preview)) {
             run.finalTasks = visible
-            panel.render(.review, tasks: visible)
+            panel.render(.review, tasks: visible, onViewUpdate: { run.timing?.mark("final_preview") })
+            persistTiming(run.timing, outcome: "success")
             return
         }
+        run.timing?.mark("final_unchanged")
+        persistTiming(run.timing, outcome: "success")
         deliver(visible, from: run)
     }
 
@@ -331,17 +406,27 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func failCapture(_ message: String) {
         let tasks = capture?.preview ?? []
-        cancelCapture()
+        cancelCapture(outcome: "failure")
         showNotice(message, tasks: tasks)
     }
 
-    private func cancelCapture() {
+    private func persistTiming(_ timing: CaptureTiming?, outcome: String) {
+        guard let timing else { return }
+        timing.mark(outcome, once: true)
+        let record = timing.record
+        Task { await CaptureTiming.write(record) }
+    }
+
+    private func cancelCapture(outcome: String = "canceled") {
         #if DEBUG
         if fixtureActive { finishVisualFixture(confirmed: false); return }
         #endif
         guard delivery == nil else { return }
         stopConnectingEscape()
         pendingPermission = nil
+        persistTiming(pendingTiming, outcome: outcome)
+        pendingTiming = nil
+        if capture?.finalTasks == nil { persistTiming(capture?.timing, outcome: outcome) }
         capture?.cancel()
         capture = nil
         dismissal?.cancel()
@@ -373,8 +458,7 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard pendingPermission == nil, capture == nil, delivery == nil else { return }
         panel.orderOut(nil)
         if let settingsWindow {
-            NSApp.activate()
-            settingsWindow.makeKeyAndOrderFront(nil)
+            bringSettingsToFront(settingsWindow)
             return
         }
 
@@ -416,7 +500,12 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = self
         window.center()
         settingsWindow = window
+        bringSettingsToFront(window)
+    }
+
+    private func bringSettingsToFront(_ window: NSWindow) {
         NSApp.activate()
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -552,10 +641,9 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             title: "Enviar o contrato à Marina",
             notes: "Anexar a versão revisada e pedir retorno por e-mail.",
             deadline: "2026-11-16",
-            when: nil,
             checklist: ["Revisar a cláusula de pagamento", "Anexar o PDF"]
         )
-        let call = SpokenTask(title: "Ligar para a gráfica", notes: nil, deadline: nil, when: "2026-11-12@09:30", checklist: [])
+        let call = SpokenTask(title: "Ligar para a gráfica", notes: nil, deadline: nil, when: "2026-11-12@14:00", checklist: [])
         panel.render(.listening, meter: meter, demoDestinations: [
             ThingsDestination(id: "work", name: "Work", isProject: false),
             ThingsDestination(id: "contracts", name: "Contratos", isProject: true),
@@ -565,6 +653,8 @@ final class RambleDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if Task.isCancelled { return }
                 if frame == 10 { panel.render(.listening, tasks: [contract], meter: meter) }
                 if frame == 25 { panel.render(.listening, tasks: [contract, call], meter: meter) }
+                if frame == 5 { panel.updateTranscript("Enviar o contrato à Marina até segunda.") }
+                if frame == 20 { panel.updateTranscript("Enviar o contrato à Marina até segunda. Ligar para a gráfica na quinta às 14h.") }
                 let beat = Double(frame) * 0.43
                 meter.update(Float(max(0, sin(beat)) * (0.62 + 0.26 * sin(beat * 2.7))))
                 try? await Task.sleep(for: .milliseconds(66))

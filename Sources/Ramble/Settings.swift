@@ -1,10 +1,31 @@
 import SwiftUI
+import Speech
+
+enum TranscriptionProvider: String {
+    case apple
+    case gpt
+
+    static let preference = "transcriptionProvider"
+    static let showTranscriptPreference = "showLiveTranscript"
+
+    static var appleAvailable: Bool {
+        if #available(macOS 26, *) { return SpeechTranscriber.isAvailable }
+        return false
+    }
+
+    static var defaultProvider: Self { appleAvailable ? .apple : .gpt }
+
+    static var current: Self {
+        UserDefaults.standard.string(forKey: preference).flatMap(Self.init(rawValue:)) ?? defaultProvider
+    }
+}
 
 @MainActor
 final class SettingsForm: ObservableObject {
     @Published var openAIKey: String
     @Published var thingsToken: String
     @Published var error: String?
+    @Published var appleStatus = ""
 
     init(credentials: Credentials?, error: String?) {
         openAIKey = credentials?.openAIKey ?? ""
@@ -16,6 +37,10 @@ final class SettingsForm: ObservableObject {
 struct SettingsView: View {
     @Environment(\.colorScheme) private var scheme
     @AppStorage(RambleLanguage.preference) private var language = RambleLanguage.portuguese
+    @AppStorage(TranscriptionProvider.preference) private var transcriber = TranscriptionProvider.defaultProvider
+    @AppStorage(TranscriptionProvider.showTranscriptPreference) private var showTranscript = true
+    @AppStorage(Vocabulary.preference) private var vocabulary = ""
+    @AppStorage("recordTimings") private var recordTimings = false
     @ObservedObject var form: SettingsForm
     let saveCredentials: (Credentials) throws -> Void
     let onLanguageChange: () -> Void
@@ -37,7 +62,7 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 field(tr("Chave da API da OpenAI"), placeholder: "sk-…", value: $form.openAIKey,
-                      help: tr("Durante a captura, o Ramble envia áudio e texto à OpenAI para detectar tarefas."))
+                      help: tr("A OpenAI extrai as tarefas do texto. A opção GPT também envia o áudio à OpenAI."))
 
                 Rectangle().fill(palette.line).frame(height: 1)
 
@@ -56,6 +81,30 @@ struct SettingsView: View {
                 form.error = nil
                 onLanguageChange()
             }
+
+            Picker(tr("Transcrição"), selection: $transcriber) {
+                Text(tr("Apple (no Mac)")).tag(TranscriptionProvider.apple)
+                Text("GPT (OpenAI)").tag(TranscriptionProvider.gpt)
+            }
+            if transcriber == .apple {
+                Text(form.appleStatus)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .task(id: language) { await updateAppleStatus() }
+            }
+            Toggle(tr("Mostrar transcrição ao vivo"), isOn: $showTranscript)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(tr("Vocabulário personalizado")).font(.system(size: 13, weight: .semibold))
+                TextEditor(text: $vocabulary)
+                    .font(.system(size: 13))
+                    .frame(height: 65)
+                    .border(palette.line)
+                    .accessibilityLabel(tr("Vocabulário personalizado"))
+                Text(tr("Um termo por linha, até 120 caracteres. No modo GPT, a lista vai para a OpenAI."))
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Toggle(tr("Registrar tempos localmente"), isOn: $recordTimings)
 
             if let error = form.error {
                 Text(error)
@@ -86,6 +135,24 @@ struct SettingsView: View {
         .frame(width: 410)
         .background(palette.surface)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func updateAppleStatus() async {
+        form.appleStatus = ""
+        guard #available(macOS 26, *), SpeechTranscriber.isAvailable,
+              let locale = await SpeechTranscriber.supportedLocale(equivalentTo: language.speechLocale) else {
+            form.appleStatus = tr("A transcrição da Apple não está disponível para este idioma ou Mac. Escolha GPT nos Ajustes.")
+            return
+        }
+        let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+        let status = await AssetInventory.status(forModules: [transcriber])
+        guard !Task.isCancelled else { return }
+        switch status {
+        case .installed: form.appleStatus = tr("Modelo da Apple instalado.")
+        case .downloading: form.appleStatus = tr("Modelo da Apple em download…")
+        case .supported: form.appleStatus = tr("O modelo da Apple será baixado na primeira captura neste idioma.")
+        default: form.appleStatus = tr("A transcrição da Apple não está disponível para este idioma ou Mac. Escolha GPT nos Ajustes.")
+        }
     }
 
     private func field(_ title: String, placeholder: String, value: Binding<String>, help: String) -> some View {

@@ -9,7 +9,21 @@ enum RambleChecks {
         try testThingsUsesACreateBatchAndConfirmsTheMatchingIDs()
         try testConvertsStereoInputToRealtimePCM()
         testMeterKeepsRecentLevelsInOrder()
-        print("5 verificações passaram.")
+        testVocabularyAndTiming()
+        print("6 verificações passaram.")
+    }
+
+    private static func testVocabularyAndTiming() {
+        let terms = Vocabulary.terms("  Maitê  \r\nmaiTÊ\nProjeto Nebulosa\nR&D\n<inválido>\n")
+        precondition(terms == ["Maitê", "Projeto Nebulosa", "R&D"])
+        let timing = CaptureTiming(transcriber: "apple", model: "fixture", language: "pt", strategy: "current", first: true, vocabulary: true)
+        timing.mark("first_buffer", once: true)
+        timing.mark("first_buffer", once: true)
+        timing.mark("segment_partial", segment: "A", audioEndMS: 27)
+        timing.mark("extract_end", segment: "A/1", usage: ExtractionUsage(input_tokens: 10, output_tokens: 5))
+        let record = timing.record
+        precondition(record.events.map(\.name) == ["start", "first_buffer", "segment_partial", "extract_end"])
+        precondition(record.events[2].audioEndMS == 27 && record.events[3].outputTokens == 5)
     }
 
     private static func require<T>(_ value: T?, file: StaticString = #fileID, line: UInt = #line) -> T {
@@ -39,9 +53,11 @@ enum RambleChecks {
 
     private static func testValidatesDatesAndKeepsExplicitTaskDetails() throws {
         let task = SpokenTask(title: "  Preparar  café ", notes: " Usar o pó novo.\n\n- Limpar a bancada. ",
-                              deadline: "2026-02-30", when: "2026-11-13@07:30", checklist: [" Comprar filtro ", ""])
-        let other = SpokenTask(title: "Telefonar", notes: nil, deadline: "2026-11-16", when: "2026-11-13@26:00", checklist: [])
-        let data = try JSONEncoder().encode(["tasks": [task, task, other]])
+                              deadline: "2026-02-30", checklist: [" Comprar filtro ", ""])
+        let other = SpokenTask(title: "Telefonar", notes: nil, deadline: "2026-11-16", when: "2026-11-16@24:00", checklist: [])
+        let scheduled = SpokenTask(title: "Ir ao dentista", notes: nil, deadline: nil, when: "2026-11-17@14:30", checklist: [])
+        let dateOnlySchedule = SpokenTask(title: "Comprar pão", notes: nil, deadline: "2026-11-17", when: "2026-11-17", checklist: [])
+        let data = try JSONEncoder().encode(["tasks": [task, task, other, scheduled, dateOnlySchedule]])
         let response = try JSONSerialization.data(withJSONObject: [
             "status": "completed",
             "output": [["type": "message", "content": [["type": "output_text", "text": String(decoding: data, as: UTF8.self)]]]],
@@ -49,16 +65,18 @@ enum RambleChecks {
         let tasks = try OpenAI.decodeTasks(response)
         precondition(tasks == [
             SpokenTask(title: "Preparar café", notes: "Usar o pó novo.\n\n- Limpar a bancada.",
-                       deadline: nil, when: "2026-11-13@07:30", checklist: ["Comprar filtro"]),
-            SpokenTask(title: "Telefonar", notes: nil, deadline: "2026-11-16", when: nil, checklist: []),
+                       deadline: nil, checklist: ["Comprar filtro"]),
+            SpokenTask(title: "Telefonar", notes: nil, deadline: "2026-11-16", checklist: []),
+            scheduled,
+            SpokenTask(title: "Comprar pão", notes: nil, deadline: "2026-11-17", checklist: []),
         ])
     }
 
     private static func testThingsUsesACreateBatchAndConfirmsTheMatchingIDs() throws {
         let tasks = [
             SpokenTask(title: "Revisar A+B & café", notes: "50%\nÀ tarde.", deadline: "2026-11-17",
-                       when: nil, checklist: ["Separar A+B"]),
-            SpokenTask(title: "Ligar para a gráfica", notes: nil, deadline: nil, when: "2026-11-12@09:30", checklist: []),
+                       checklist: ["Separar A+B"]),
+            SpokenTask(title: "Ligar para a gráfica", notes: nil, deadline: nil, when: "2026-11-12@14:00", checklist: []),
         ]
         let area = ThingsDestination(id: "work-area-id", name: "Work", isProject: false)
         let batch = ThingsRequest(tasks: tasks, destinations: [tasks[0].previewKey: area])
@@ -82,7 +100,9 @@ enum RambleChecks {
         precondition(checklist[0]["type"] as? String == "checklist-item")
         precondition((checklist[0]["attributes"] as? [String: String])?["title"] == "Separar A+B")
         let second = require(operations[1]["attributes"] as? [String: String])
-        precondition(second["when"] == tasks[1].when)
+        precondition(second["deadline"] == nil)
+        precondition(first["when"] == nil)
+        precondition(second["when"] == "2026-11-12@14:00")
         precondition(second["list-id"] == nil)
 
         let success = require(items["x-success"])
